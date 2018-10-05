@@ -15,7 +15,7 @@ BINDIR=${INSTALL_PREFIX}/bin
 MANDIR=${INSTALL_PREFIX}/man
 TEMPDIR=/tmp
 
-LIB_DIR = $(PKG_DIR)/lib/release.static
+LIB_DIR = /usr/lib/checkpoint/release.static
 STATIC_LIBS = \
 	-lopsec \
 	-lsicauth -lsic \
@@ -30,7 +30,7 @@ STATIC_LIBS = \
 	-lAppUtils -lEventUtils \
 	-lEncode -lComUtils \
 	-lResolve -lDataStruct \
-	-lOS \
+	-lProdUtils -lOS \
 	-lcpprod50 
 
 LIBS = -lpthread -lresolv -ldl -lnsl -lelf -lstdc++

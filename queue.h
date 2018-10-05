@@ -43,6 +43,7 @@ typedef int Bool;
 
 typedef struct LinkedListElement {
         char *listElement;                                 // content of any specified element in this list
+        int fileID, filePos;
         struct LinkedListElement *next; //The point to the next elementin this list
 } LinkedList;
 
@@ -54,8 +55,8 @@ LinkedList * tail;
 void initialize();                                //Initialization of a linked list
 void setThreshold(int thresh);        //Set the queue length limitation
 int getThreshold();                                //Return the queue length limitation
-Bool addFirst(char* data);                //Insert the given element at the beginning of this list.
-Bool add(char* data);                        //Append the given element to the end of this list.
+Bool addFirst(char* data, int fileID, int filePos);                //Insert the given element at the beginning of this list.
+Bool add(char* data, int fileID, int filePos);                        //Append the given element to the end of this list.
 void clearList();                                //Remove all of the elements from this list.
 void printList();                                //Dsiplay all of the elements from this list.
 int sizeofList();                                //Return count of elements in queue

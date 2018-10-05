@@ -43,5 +43,6 @@ typedef void * (*ThreadFuncType) (void *);
 #define ThreadIDType pthread_t
 
 void createThread(ThreadIDType * threadID, ThreadFuncType thread_func, void * data);
+void waitForThread(ThreadIDType threadID);
 
 #endif

@@ -74,8 +74,20 @@ int testThread() {
 * A cover for thread creation function
 */
 void createThread (ThreadIDType *threadID, ThreadFuncType thread_func, void * data) {
+        pthread_attr_t attr;
+
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
         if (pthread_create(threadID, NULL, thread_func, data) != 0) {
                 fprintf(stderr, "failed to create thread ...\n");
+                exit(2);
+        }
+        pthread_attr_destroy(&attr);
+}
+
+void waitForThread (ThreadIDType threadID) {
+        if (pthread_join(threadID, NULL) != 0) {
+                fprintf(stderr, "failed to join thread ...\n");
                 exit(2);
         }
 }

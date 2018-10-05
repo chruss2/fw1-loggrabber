@@ -42,6 +42,8 @@
 #include <unistd.h>
 #include <endian.h>
 #include <syslog.h>
+#include <errno.h>
+#include <signal.h>
 
 /*
  * OPSEC SDK related header files
@@ -75,6 +77,9 @@
 #define INITIAL_CAPACITY    1024
 #define CAPACITY_INCREMENT  4096
 
+/* Special argument to read_fw1_logfile() */
+#define USE_POSFILE         NULL
+
 /*
  * Type definitions
  */
@@ -105,6 +110,8 @@ typedef struct configvalues
   char **fw1_filter_array;
   int audit_filter_count;
   char **audit_filter_array;
+  char *fw1_posfile;
+  char *audit_posfile;
 }
 configvalues;
 
@@ -115,7 +122,14 @@ configvalues;
 /*
  * function to get the content of a given FW-1 Logfile
  */
-int read_fw1_logfile (char **);
+int read_fw1_logfile (char *);
+
+/*
+ * initilization functions to set up signal handlers
+ */
+void set_up_signal_mask (sigset_t *);
+void set_up_signal_handlers (void);
+void unblock_signals_for_thread( void );
 
 /*
  * event handler used by read_fw1_logfile to approve a rulebase
@@ -208,13 +222,15 @@ LeaFilterRulebase *create_audit_filter_rule (LeaFilterRulebase *, char[255]);
 /*
  * function to clean up the opsec environment
  */
-void cleanup_fw1_environment (OpsecEnv *, OpsecEntity *, OpsecEntity *);
+void cleanup_fw1_environment (OpsecEnv **, OpsecEntity *, OpsecEntity *);
 
 /*
  * function to read configfile
  */
 void check_config_files (char *, char *);
 void read_config_file (char *, struct configvalues *);
+void read_pos_file (char *, long *, int *);
+void write_pos_file (char *, int, int);
 
 /*
  * initilization function to define open, submit and close handler
@@ -287,8 +303,8 @@ char getschar ();
 /*
  * file operation functions
  */
-// copy a file into another file
-void fileCopy (const char *inputfile, const char *outputfile);
+// move a file into another filename
+void fileMove (const char *oldfile, const char *newfile);
 
 // check and see whether or not a file exists
 int fileExist (const char *fileName);
@@ -323,6 +339,11 @@ char **filterarray = NULL;
 int filtercount = 0;
 int mysql_mode = -1;
 int create_tables = FALSE;
+char *PosfileName = NULL;
+long file_id = -1;
+int file_pos = 0;
+int must_terminate = 0;
+int must_raise_shutdown = 0;
 
 OpsecSession* pSession = NULL;
 OpsecEnv*     pEnv     = NULL;
@@ -332,8 +353,8 @@ OpsecEnv*     pEnv     = NULL;
  */
 long initent, resumeent, shutdownent;
 
-//A mutex for multithread thread synchronization
-pthread_mutex_t mutex;
+//Mutexes for multithread thread synchronization
+pthread_mutex_t mutex, envMutex;
 
 //LEA record worker thread id
 ThreadIDType threadid;
@@ -372,7 +393,9 @@ configvalues cfgvalues = {
   0,                            // fw1_filter_count
   NULL,                         // fw1_filter_array
   0,                            // audit_filter_count
-  NULL                          // audit_filter_array
+  NULL,                         // audit_filter_array
+  NULL,                         // fw1_posfile
+  NULL                          // audit_posfile
 };
 
 

@@ -73,6 +73,10 @@ main (int argc, char *argv[])
         {
           resolve_mode = 0;
         }
+      else if (strcmp (argv[i], "--resolve-and-store") == 0)
+        {
+          resolve_mode = 2;
+        }
       else if (strcmp (argv[i], "--debug-level") == 0)
         {
           i++;
@@ -247,6 +251,7 @@ main (int argc, char *argv[])
       cfgvalues.audit_filter_count = filtercount;
       cfgvalues.audit_filter_array = filterarray;
     }
+  PosfileName = cfgvalues.audit_mode ? cfgvalues.audit_posfile : cfgvalues.fw1_posfile;
 
   /*
    * free no more used char*
@@ -295,6 +300,21 @@ main (int argc, char *argv[])
                    "       omit this parameter.\n");
           exit_loggrabber (1);
         }
+      if (PosfileName != NULL)
+        {
+          fprintf (stderr,
+                   "ERROR: pos file is only available for connections\n"
+                   "       to FW-1 NG. For connections to FW-1 4.1 (2000), please\n"
+                   "       omit this configuration option.\n");
+          exit_loggrabber (1);
+        }
+    }
+
+  if (!cfgvalues.online_mode && PosfileName != NULL)
+    {
+      fprintf (stderr,
+               "ERROR: pos file is only available in online mode.\n");
+      exit_loggrabber (1);
     }
 
   if (cfgvalues.online_mode && (!(cfgvalues.audit_mode))
@@ -322,6 +342,8 @@ main (int argc, char *argv[])
 
 /* A mutex object to provide safe manipulation of Check Point FW-1 event queue across multiple threads.  */
   pthread_mutex_init(&mutex, NULL);
+/* A mutex object to provide safe creation/destruction of OPSEC environment. */
+  pthread_mutex_init(&envMutex, NULL);
 
   /*
    * set logging envionment
@@ -329,6 +351,8 @@ main (int argc, char *argv[])
   logging_init_env (cfgvalues.log_mode);
 
   open_log ();
+
+  set_up_signal_handlers();
 
   createThread(&threadid, leaRecordProcessor, NULL);
 
@@ -344,7 +368,7 @@ main (int argc, char *argv[])
       fprintf (stderr, "DEBUG: Record Separator : %c\n",
                cfgvalues.record_separator);
       fprintf (stderr, "DEBUG: Resolve Addresses: %s\n",
-               (cfgvalues.resolve_mode ? "Yes" : "No"));
+               (cfgvalues.resolve_mode == 2 ? "Resolve and Store" : (cfgvalues.resolve_mode ? "Yes" : "No")));
       fprintf (stderr, "DEBUG: Show Filenames   : %s\n",
                (cfgvalues.showfiles_mode ? "Yes" : "No"));
       fprintf (stderr, "DEBUG: FW1-2000         : %s\n",
@@ -353,6 +377,10 @@ main (int argc, char *argv[])
                (cfgvalues.online_mode ? "Yes" : "No"));
       fprintf (stderr, "DEBUG: Audit-Log        : %s\n",
                (cfgvalues.audit_mode ? "Yes" : "No"));
+      fprintf (stderr, "DEBUG: FW1_PosFilename  : %s\n",
+               cfgvalues.fw1_posfile);
+      fprintf (stderr, "DEBUG: Audit_PosFilename: %s\n",
+               cfgvalues.audit_posfile);
     }
 
   /*
@@ -381,14 +409,14 @@ main (int argc, char *argv[])
     {
       lstptr = sl;
 
-      while (lstptr)
+      while (lstptr && !must_terminate)
         {
           if (cfgvalues.debug_mode)
             {
               fprintf (stderr, "DEBUG: Processing Logfile: %s\n",
                        lstptr->data);
             }
-          read_fw1_logfile (&(lstptr->data));
+          read_fw1_logfile (lstptr->data);
           lstptr = lstptr->next;
         }
     }
@@ -396,6 +424,10 @@ main (int argc, char *argv[])
   /*
    * else search for given string in available logfile-names
    */
+  else if (cfgvalues.online_mode && PosfileName != NULL)
+    {
+      read_fw1_logfile (USE_POSFILE);
+    }
   else
     {
       lstptr = stringlist_search (&sl, cfgvalues.fw1_logfile, &foundstring);
@@ -403,28 +435,31 @@ main (int argc, char *argv[])
       /*
        * get the data from the matching logfiles
        */
-      if (!lstptr)
+      if (!lstptr && !must_terminate)
         {
           if (cfgvalues.debug_mode)
             {
               fprintf (stderr, "DEBUG: Processing Logfile: %s\n",
                        cfgvalues.fw1_logfile);
             }
-          read_fw1_logfile (&(cfgvalues.fw1_logfile));
+          read_fw1_logfile (cfgvalues.fw1_logfile);
         }
-      while (lstptr)
+      while (lstptr && !must_terminate)
         {
           if (cfgvalues.debug_mode)
             {
               fprintf (stderr, "DEBUG: Processing Logfile: %s\n",
                        foundstring);
             }
-          read_fw1_logfile (&foundstring);
+          read_fw1_logfile (foundstring);
           lstptr =
             stringlist_search (&(lstptr->next), cfgvalues.fw1_logfile,
                                &foundstring);
         }
     }
+
+  alive = FALSE;
+  waitForThread(threadid);
 
   close_log ();
 
@@ -436,7 +471,7 @@ main (int argc, char *argv[])
  * function read_fw1_logfile
  */
 int
-read_fw1_logfile (char **LogfileName)
+read_fw1_logfile (char *LogfileName)
 {
   OpsecEntity *pClient = NULL;
   OpsecEntity *pServer = NULL;
@@ -460,6 +495,8 @@ read_fw1_logfile (char **LogfileName)
 
   while (keepAlive)
     {
+      pthread_mutex_lock(&envMutex);
+
       /* create opsec environment for the main loop */
       if ((pEnv =
            opsec_init (OPSEC_CONF_FILE, cfgvalues.leaconfig_filename,
@@ -584,9 +621,18 @@ read_fw1_logfile (char **LogfileName)
             }                    //end of middle if
         }                        //end of if
 
+      pthread_mutex_unlock(&envMutex);
+
+      if (must_terminate)
+          break;
+
       /*
        * initialize opsec-client
        */
+      if (cfgvalues.debug_mode)
+        {
+          fprintf (stderr, "DEBUG: Initializing readlog client\n");
+        }
       pClient = opsec_init_entity (pEnv, LEA_CLIENT,
                                    LEA_RECORD_HANDLER,
                                    read_fw1_logfile_record,
@@ -623,6 +669,10 @@ read_fw1_logfile (char **LogfileName)
        * initialize opsec-server for authenticated and unauthenticated connections
        */
 
+      if (cfgvalues.debug_mode)
+        {
+          fprintf (stderr, "DEBUG: Initializing server\n");
+        }
       pServer =
         opsec_init_entity (pEnv, LEA_SERVER, OPSEC_ENTITY_NAME, "lea_server",
                            OPSEC_EOL);
@@ -635,32 +685,36 @@ read_fw1_logfile (char **LogfileName)
           fprintf (stderr,
                    "ERROR: failed to initialize client/server-pair (%s)\n",
                    opsec_errno_str (opsec_errno));
-          cleanup_fw1_environment (pEnv, pClient, pServer);
+          cleanup_fw1_environment (&pEnv, pClient, pServer);
           exit_loggrabber (1);
         }
 
       /*
        * create LEA-session. differs for connections to FW-1 4.1 and FW-1 NG
        */
+      if (cfgvalues.debug_mode)
+        {
+          fprintf (stderr, "DEBUG: Initializing session\n");
+        }
       if (cfgvalues.fw1_2000)
         {
           if (cfgvalues.online_mode)
             {
               pSession =
                 lea_new_session (pClient, pServer, LEA_ONLINE, LEA_FILENAME,
-                                 *LogfileName, LEA_AT_END);
+                                 LogfileName, LEA_AT_END);
             }
           else
             {
               pSession =
                 lea_new_session (pClient, pServer, LEA_OFFLINE, LEA_FILENAME,
-                                 *LogfileName, LEA_AT_START);
+                                 LogfileName, LEA_AT_START);
             }
           if (!pSession)
             {
               fprintf (stderr, "ERROR: failed to create session (%s)\n",
                        opsec_errno_str (opsec_errno));
-              cleanup_fw1_environment (pEnv, pClient, pServer);
+              cleanup_fw1_environment (&pEnv, pClient, pServer);
               exit_loggrabber (1);
             }
         }
@@ -669,25 +723,44 @@ read_fw1_logfile (char **LogfileName)
           /*
            * create a suspended session, i.e. not log data will be sent to client
            */
-          if (cfgvalues.online_mode)
+          if (LogfileName == USE_POSFILE)
+            {
+              /* Use PosfileName to get file and starting point. */
+              read_pos_file(PosfileName, &file_id, &file_pos);
+              if (file_id == -1)
+                {
+                  pSession =
+                    lea_new_suspended_session (pClient, pServer, LEA_ONLINE,
+                                               cfgvalues.audit_mode ? LEA_CURRENT_AUDIT_FILEID : LEA_FIRST_UNIFIED_FILEID,
+                                               LEA_AT_POS, file_pos);
+                }
+              else
+                {
+                  pSession =
+                    lea_new_suspended_session (pClient, pServer, LEA_ONLINE,
+                                               LEA_UNIFIED_FILEID, file_id,
+                                               LEA_AT_POS, file_pos);
+                }
+            }
+          else if (cfgvalues.online_mode)
             {
               pSession =
                 lea_new_suspended_session (pClient, pServer, LEA_ONLINE,
-                                           LEA_UNIFIED_SINGLE, *LogfileName,
+                                           LEA_UNIFIED_SINGLE, LogfileName,
                                            LEA_AT_END);
             }
           else
             {
               pSession =
                 lea_new_suspended_session (pClient, pServer, LEA_OFFLINE,
-                                           LEA_UNIFIED_SINGLE, *LogfileName,
+                                           LEA_UNIFIED_SINGLE, LogfileName,
                                            LEA_AT_START);
             }
           if (!pSession)
             {
               fprintf (stderr, "ERROR: failed to create session (%s)\n",
                        opsec_errno_str (opsec_errno));
-              cleanup_fw1_environment (pEnv, pClient, pServer);
+              cleanup_fw1_environment (&pEnv, pClient, pServer);
               exit_loggrabber (1);
             }
 
@@ -768,21 +841,30 @@ read_fw1_logfile (char **LogfileName)
             }
         }
 
-      opsec_start_keep_alive (pSession, 0);
+      opsec_start_keep_alive (pSession, 60000);
 
       /*
        * start the opsec loop
        */
+      if (cfgvalues.debug_mode)
+        {
+          fprintf (stderr, "DEBUG: Starting main loop\n");
+        }
       opsec_mainloop (pEnv);
 
       /*
        * remove opsec stuff
        */
-      cleanup_fw1_environment (pEnv, pClient, pServer);
+      cleanup_fw1_environment (&pEnv, pClient, pServer);
 
       if (keepAlive)
         {
-          SLEEP (recoverInterval);
+          for (i = recoverInterval * 10; i > 0; i--)
+            {
+              SLEEPMIL (100);
+              if (must_terminate)
+                  return 0;
+            }
         }
     }
 
@@ -904,6 +986,7 @@ read_fw1_logfile_record (OpsecSession * pSession, lea_record * pRec,
   char *mymsg = NULL;
   int number_fields;
   unsigned int messagecap = 0;
+  int out_field_num = 0;
 
   if (cfgvalues.debug_mode >= 2)
     {
@@ -919,7 +1002,7 @@ read_fw1_logfile_record (OpsecSession * pSession, lea_record * pRec,
       strcpy (tmpdata, "\0");
       szAttrib = lea_attr_name (pSession, pRec->fields[i].lea_attr_id);
 
-      if (!(cfgvalues.resolve_mode))
+      if (cfgvalues.resolve_mode != 1)
         {
           switch (pRec->fields[i].lea_val_type)
             {
@@ -959,33 +1042,54 @@ read_fw1_logfile_record (OpsecSession * pSession, lea_record * pRec,
                 }
               sprintf (tmpdata, "%d", us);
               break;
+            case LEA_VT_TIME:
+              /* For compatibility, resolve time values only when
+                 resolve_mode is Both, not when it is No */
+              if (cfgvalues.resolve_mode == 2)
+                {
+                  ul = pRec->fields[i].lea_value.ul_value;
+                  sprintf (tmpdata, "%lu", ul);
+                  break;
+                }
             }
         }
 
-      *field_headers[i] = string_duplicate (szAttrib);
+      if (tmpdata[0] && cfgvalues.resolve_mode == 2)
+        {
+          char *raw_field = malloc(strlen(szAttrib) + 5);
+          strcpy(raw_field, szAttrib);
+          strcat(raw_field, ":raw");
+          *field_headers[out_field_num] = raw_field;
+          *field_values[out_field_num] = string_duplicate (tmpdata);
+          out_field_num++;
+          tmpdata[0] = '\0';
+        }
+
+      *field_headers[out_field_num] = string_duplicate (szAttrib);
 
       if (tmpdata[0])
         {
-          *field_values[i] = string_duplicate (tmpdata);
+          *field_values[out_field_num] = string_duplicate (tmpdata);
         }
       else
         {
-          *field_values[i] =
+          *field_values[out_field_num] =
             string_duplicate (lea_resolve_field
                               (pSession, pRec->fields[i]));
         }
+      out_field_num++;
     }
 
   /*
    * print logentry to stdout
    */
-  for (i = 0; i < number_fields; i++)
+  for (i = 0; i < out_field_num; i++)
     {
       if (*field_values[i])
         {
           tmpstr1 =
             string_escape (*field_headers[i],
-                           cfgvalues.record_separator);
+                           '=');
           tmpstr2 =
             string_escape (*field_values[i],
                            cfgvalues.record_separator);
@@ -1009,7 +1113,7 @@ read_fw1_logfile_record (OpsecSession * pSession, lea_record * pRec,
     }
 
   // empty string fields
-  for (i = 0; i < number_fields; i++)
+  for (i = 0; i < out_field_num; i++)
     {
       if (*field_headers[i] != NULL)
         {
@@ -1028,10 +1132,12 @@ read_fw1_logfile_record (OpsecSession * pSession, lea_record * pRec,
     {
       mymsg = string_mask_newlines (message);
       free (message);
+      file_id = lea_get_logfile_desc(pSession)->fileid;
+      file_pos = lea_get_record_pos(pSession);
 
       pthread_mutex_lock(&mutex);
       //enter critical section
-      add(mymsg);
+      add(mymsg, file_id, file_pos);
       pthread_mutex_unlock(&mutex);
       //end critical section
       if (!(cfgvalues.fw1_2000))
@@ -1247,10 +1353,6 @@ get_fw1_logfiles_end (OpsecSession * psession)
                         break;
         }                                //end of switch
 
-        opsec_del_event_handler (pEnv, initent, (void *) fc_handler, 0);
-        opsec_del_event_handler (pEnv, resumeent, (void *) fc_handler, 0);
-        opsec_del_event_handler (pEnv, shutdownent, (void *) fc_handler, 0);
-
         return OPSEC_SESSION_OK;
 
 }
@@ -1285,6 +1387,7 @@ int fc_handler (OpsecEnv *pEnv, long eventid, void *raise_data, void *set_data) 
                 if (cfgvalues.debug_mode) {
                         fprintf (stderr, "Info: Shutdown event has been received.\n");
                 }
+                opsec_unraise_event (pEnv, shutdownent, (void *) 0);
                 opsec_del_event_handler (pEnv, initent, (void *) fc_handler, 0);
                 opsec_del_event_handler (pEnv, resumeent, (void *) fc_handler, 0);
                 opsec_del_event_handler (pEnv, shutdownent, (void *) fc_handler, 0);
@@ -1512,6 +1615,7 @@ get_fw1_logfiles ()
       fprintf (stderr, "DEBUG: function get_fw1_logfiles\n");
     }
 
+  pthread_mutex_lock(&envMutex);
   /* create opsec environment for the main loop */
   if ((pEnv =
        opsec_init (OPSEC_CONF_FILE, cfgvalues.leaconfig_filename,
@@ -1586,10 +1690,15 @@ get_fw1_logfiles ()
         }                        //end of middle if
     }                                //end of if
 
+  pthread_mutex_unlock(&envMutex);
 
   /*
    * initialize opsec-client
    */
+  if (cfgvalues.debug_mode)
+    {
+      fprintf (stderr, "DEBUG: Initializing listfiles client\n");
+    }
   pClient = opsec_init_entity (pEnv, LEA_CLIENT,
                                LEA_DICT_HANDLER, get_fw1_logfiles_dict,
                                OPSEC_SESSION_END_HANDLER,
@@ -1598,6 +1707,10 @@ get_fw1_logfiles ()
   /*
    * initialize opsec-server for authenticated and unauthenticated connections
    */
+  if (cfgvalues.debug_mode)
+    {
+      fprintf (stderr, "DEBUG: Initializing server\n");
+    }
   pServer =
     opsec_init_entity (pEnv, LEA_SERVER, OPSEC_ENTITY_NAME, "lea_server",
                        OPSEC_EOL);
@@ -1610,13 +1723,17 @@ get_fw1_logfiles ()
       fprintf (stderr,
                "ERROR: failed to initialize client/server-pair (%s)\n",
                opsec_errno_str (opsec_errno));
-      cleanup_fw1_environment (pEnv, pClient, pServer);
+      cleanup_fw1_environment (&pEnv, pClient, pServer);
       exit_loggrabber (1);
     }
 
   /*
    * create LEA-session
    */
+  if (cfgvalues.debug_mode)
+    {
+      fprintf (stderr, "DEBUG: Initializing session\n");
+    }
   if (!
       (pSession =
        lea_new_session (pClient, pServer, LEA_OFFLINE, LEA_FILENAME,
@@ -1624,21 +1741,25 @@ get_fw1_logfiles ()
     {
       fprintf (stderr, "ERROR: failed to create session (%s)\n",
                opsec_errno_str (opsec_errno));
-      cleanup_fw1_environment (pEnv, pClient, pServer);
+      cleanup_fw1_environment (&pEnv, pClient, pServer);
       exit_loggrabber (1);
     }
 
-  opsec_start_keep_alive (pSession, 0);
+  opsec_start_keep_alive (pSession, 60000);
 
   /*
    * start the opsec loop
    */
+  if (cfgvalues.debug_mode)
+    {
+      fprintf (stderr, "DEBUG: Starting main loop\n");
+    }
   opsec_mainloop (pEnv);
 
   /*
    * remove opsec stuff
    */
-  cleanup_fw1_environment (pEnv, pClient, pServer);
+  cleanup_fw1_environment (&pEnv, pClient, pServer);
 
   return 0;
 }
@@ -1674,18 +1795,26 @@ get_fw1_logfiles_dict (OpsecSession * pSession, int nDictId, LEA_VT nValType,
    * get names of available logfiles and create list of these names
    */
   learesult = lea_get_first_file_info (pSession, &logfile, &nID, &aID);
-  while (learesult == 0)
+  while (!must_terminate &&
+      (learesult == LEA_SESSION_OK || learesult == LEA_SESSION_FILE_PURGED))
     {
       if (cfgvalues.debug_mode)
         {
-          fprintf (stderr, "DEBUG: - %s\n", logfile);
+          fprintf (stderr, "DEBUG: - %d %d %s\n", nID, aID, learesult == LEA_SESSION_FILE_PURGED ? "(purged)" : logfile);
         }
-      if (cfgvalues.showfiles_mode)
+      if (learesult == LEA_SESSION_OK)
         {
-          fprintf (stderr, "- %s\n", logfile);
+          if (cfgvalues.showfiles_mode)
+            {
+              fprintf (stderr, "- %s\n", logfile);
+            }
+          stringlist_append (&sl, logfile);
         }
-      stringlist_append (&sl, logfile);
       learesult = lea_get_next_file_info (pSession, &logfile, &nID, &aID);
+    }
+  if (!must_terminate && learesult != LEA_SESSION_IT_END)
+    {
+      fprintf (stderr, "Could not get list of files: error %d\n", learesult);
     }
 
   /*
@@ -1700,7 +1829,7 @@ get_fw1_logfiles_dict (OpsecSession * pSession, int nDictId, LEA_VT nValType,
  * function cleanup_fw1_environment
  */
 void
-cleanup_fw1_environment (OpsecEnv * env, OpsecEntity * client,
+cleanup_fw1_environment (OpsecEnv ** env, OpsecEntity * client,
                          OpsecEntity * server)
 {
   if (cfgvalues.debug_mode >= 2)
@@ -1712,8 +1841,11 @@ cleanup_fw1_environment (OpsecEnv * env, OpsecEntity * client,
     opsec_destroy_entity (client);
   if (server)
     opsec_destroy_entity (server);
-  if (env)
-    opsec_env_destroy (env);
+  pthread_mutex_lock(&envMutex);
+  if (*env)
+    opsec_env_destroy (*env);
+  *env = NULL;
+  pthread_mutex_unlock(&envMutex);
 }
 
 /*
@@ -4324,6 +4456,10 @@ read_config_file (char *filename, configvalues * cfgvalues)
                 {
                   cfgvalues->resolve_mode = 1;
                 }
+              else if (string_icmp (configvalue, "both") == 0)
+                {
+                  cfgvalues->resolve_mode = 2;
+                }
               else
                 {
                   fprintf (stderr,
@@ -4503,6 +4639,16 @@ read_config_file (char *filename, configvalues * cfgvalues)
                 }
               cfgvalues->audit_filter_array[cfgvalues->audit_filter_count -
                                             1] =
+                string_duplicate (string_trim (configvalue, '"'));
+            }
+          else if (strcmp (configparameter, "FW1_POSFILE") == 0)
+            {
+              cfgvalues->fw1_posfile =
+                string_duplicate (string_trim (configvalue, '"'));
+            }
+          else if (strcmp (configparameter, "AUDIT_POSFILE") == 0)
+            {
+              cfgvalues->audit_posfile =
                 string_duplicate (string_trim (configvalue, '"'));
             }
           else
@@ -4864,26 +5010,26 @@ submit_logfile (char *message)
       strcpy (output_file_name, cfgvalues.output_file_prefix);
       strcat (output_file_name, ".log");
       //Copy log file
-      sprintf (sn, "%s-%4.4d-%2.2d-%2.2d_%2.2d%2.2d%2.2d.log",
+      sprintf (sn, "%s-%04d-%02d-%02d_%02d%02d%02d.log",
                cfgvalues.output_file_prefix, year, month, day, hour, minute,
                second);
       if (fileExist (sn))
         {
           //Unfortunately, events come in too fast
           i = 1;
-          sprintf (sn, "%s-%4.4d-%2.2d-%2.2d_%2.2d%2.2d%2.2d_%d.log",
+          sprintf (sn, "%s-%04d-%02d-%02d_%02d%02d%02d_%d.log",
                    cfgvalues.output_file_prefix, year, month, day, hour,
                    minute, second, i);
 
           while (fileExist (sn))
             {
               i++;
-              sprintf (sn, "%s-%4.4d-%2.2d-%2.2d_%2.2d%2.2d%2.2d_%d.log",
+              sprintf (sn, "%s-%04d-%02d-%02d_%02d%02d%02d_%d.log",
                        cfgvalues.output_file_prefix, year, month, day, hour,
                        minute, second, i);
             }                        //end of while
         }                        //end of inner if
-      fileCopy (output_file_name, sn);
+      fileMove (output_file_name, sn);
       //Clean log file
       if ((logstream = fopen (output_file_name, "w")) == NULL)
         {;
@@ -4914,34 +5060,14 @@ close_logfile ()
 }
 
 void
-fileCopy (const char *inputFile, const char *outputFile)
+fileMove (const char *oldFile, const char *newFile)
 {
-
-  // The most recent character from input file to output file
-  char x;
-
-  // fpi points to the input file, fpo points to the output file
-  FILE *fpi, *fpo;
-
   if (cfgvalues.debug_mode >= 2)
     {
-      fprintf (stderr, "DEBUG: function fileCopy\n");
+      fprintf (stderr, "DEBUG: function fileMove\n");
     }
 
-  // Open input file, read-only
-  fpi = fopen (inputFile, "r");
-  // Open output file, write-only
-  fpo = fopen (outputFile, "w");
-
-  // Get next char from input file, store in x, until we reach EOF
-  while ((x = getc (fpi)) != -1)
-    {
-      putc (x, fpo);
-    }
-
-  //After we have done, close both files
-  fclose (fpi);
-  fclose (fpo);
+  rename(oldFile, newFile);
 
   return;
 }
@@ -5255,16 +5381,77 @@ check_config_files (char *loggrabberconf, char *leaconf)
     }
 }
 
+/*
+ * function to read pos file
+ */
+void
+read_pos_file (char *filename, long *fileID, int *pos)
+{
+  FILE *posfile;
+  char line[256];
+
+  *fileID = -1;
+  *pos = 0;
+  if ((posfile = fopen (filename, "r")) == NULL)
+    {
+      if (errno == ENOENT)
+        {
+          return;
+        }
+      fprintf (stderr, "ERROR: Cannot open posfile (%s)\n", filename);
+      exit_loggrabber (1);
+    }
+
+  if (fgets (line, sizeof line, posfile))
+    {
+      *fileID = atol(line);
+    }
+  if (fgets (line, sizeof line, posfile))
+    {
+      *pos = atoi(line);
+    }
+
+  fclose (posfile);
+}
+
+/*
+ * function to read pos file
+ */
+void
+write_pos_file (char *filename, int fileID, int pos)
+{
+  FILE *posfile;
+
+  if ((posfile = fopen (filename, "w")) == NULL)
+    {
+      fprintf (stderr, "ERROR: Cannot create posfile (%s)\n", filename);
+      exit_loggrabber (1);
+    }
+
+  fprintf(posfile, "%d\n%d\n", fileID, pos);
+
+  fclose (posfile);
+}
+
 /* Function prototypes for thread routines */
 ThreadFuncReturnType leaRecordProcessor( void *data ){
 
     LinkedList * records;
     char* message;
 
+    unblock_signals_for_thread();
+
     alive = TRUE;
 
-    while(alive)
+    while(TRUE)
         {
+                if (must_raise_shutdown) {
+                        pthread_mutex_lock(&envMutex);
+                        if (pEnv != NULL)
+                            opsec_raise_persistent_event (pEnv, shutdownent, (void *) 0);
+                        pthread_mutex_unlock(&envMutex);
+                        must_raise_shutdown = 0;
+                }
 
                 pthread_mutex_lock(&mutex);
 
@@ -5281,6 +5468,8 @@ ThreadFuncReturnType leaRecordProcessor( void *data ){
                                         suspended=FALSE;
                                 }
                         }
+                        if (!alive)
+                                break;
                         SLEEPMIL(8);
                 } else {
                         records = getFirst();
@@ -5291,6 +5480,10 @@ ThreadFuncReturnType leaRecordProcessor( void *data ){
 
                                 //submit received lea record
                                 submit_log (message);
+                                if (PosfileName != NULL)
+                                  {
+                                    write_pos_file(PosfileName, records->fileID, records->filePos);
+                                  }
 
                                 //clean used memory
                                 free(message);
@@ -5303,3 +5496,33 @@ ThreadFuncReturnType leaRecordProcessor( void *data ){
         return 0;
 }
 
+static void handle_signal( int signum ){
+    must_terminate = 1;
+    must_raise_shutdown = 1;
+}
+
+void set_up_signal_mask( sigset_t* sigset ){
+    sigemptyset(sigset);
+    sigaddset(sigset, SIGTERM);
+    sigaddset(sigset, SIGINT);
+}
+
+void set_up_signal_handlers( void ){
+    struct sigaction sa;
+
+    sa.sa_handler = handle_signal;
+    set_up_signal_mask(&sa.sa_mask);
+    sa.sa_flags = 0;
+    /* block signals by default. Call unblock_signals_for_thread() in the
+       thread that should receive the signals. */
+    pthread_sigmask(SIG_BLOCK, &sa.sa_mask, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    must_terminate = 0;
+}
+
+void unblock_signals_for_thread( void ){
+    sigset_t sigset;
+    set_up_signal_mask(&sigset);
+    pthread_sigmask(SIG_UNBLOCK, &sigset, NULL);
+}

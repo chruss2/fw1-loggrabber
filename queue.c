@@ -64,27 +64,27 @@ int testLinkedList() {
         sprintf(stringbuffer, "78");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        add(message);
+        add(message, 1, 2);
 
         sprintf(stringbuffer, "90");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        add(message);
+        add(message, 3, 4);
 
         sprintf(stringbuffer, "56");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        addFirst(message);
+        addFirst(message, 5, 6);
 
         sprintf(stringbuffer, "34");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        addFirst(message);
+        addFirst(message, 7, 8);
 
         sprintf(stringbuffer, "12");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        addFirst(message);
+        addFirst(message, 9, 10);
 
         printf ("display begins\n");
         printf ("The elements of list are shown as follows:\n");
@@ -118,7 +118,7 @@ int testLinkedList() {
         sprintf(stringbuffer, "88");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        add(message);
+        add(message, 11, 12);
 
         printf ("display begins\n");
         printf ("The elements of list are shown as follows:\n");
@@ -160,12 +160,12 @@ int testLinkedList() {
         sprintf(stringbuffer, "12");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        add(message);
+        add(message, 13, 14);
 
         sprintf(stringbuffer, "34");
         message = (char *) malloc(capacity+1);
         strcpy(message,stringbuffer);
-        add(message);
+        add(message, 15, 16);
 
     clearList();
 
@@ -190,38 +190,39 @@ int getThreshold(){
 }
 
 //Append the specified element to the end of this list.
-Bool add(char* data) {
+Bool add(char* data, int fileID, int filePos) {
 
         if(head == NULL) {
                 head = (LinkedList *) malloc (sizeof (struct LinkedListElement));
-                head -> listElement = data;
-                head -> next = NULL;
                 tail = head;
         } else {
                 tail -> next = (LinkedList *) malloc (sizeof (struct LinkedListElement));
                 tail = tail -> next;
-                tail -> next = NULL;
-                tail -> listElement = data;
         }
+        tail -> next = NULL;
+        tail -> listElement = data;
+        tail -> fileID = fileID;
+        tail -> filePos = filePos;
         countOfList++;
         return TRUE;
 }
 
 //Insert the given element at the beginning of this list.
-Bool addFirst(char* data){
+Bool addFirst(char* data, int fileID, int filePos){
         LinkedList * listPointer;
 
         if(head == NULL) {
                 head = (LinkedList *) malloc (sizeof (struct LinkedListElement));
-                head -> listElement = data;
                 head -> next = NULL;
                 tail = head;
         } else {
                 listPointer = (LinkedList *) malloc (sizeof (struct LinkedListElement));
                 listPointer -> next = head;
                 head = listPointer;
-                head -> listElement = data;
         }
+        head -> listElement = data;
+        head -> fileID = fileID;
+        head -> filePos = filePos;
         countOfList++;
         return TRUE;
 }
